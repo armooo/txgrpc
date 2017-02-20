@@ -9,5 +9,7 @@ setup(
     author_email='armooo@armooo.net',
     packages=find_packages(),
     install_requires=[
+        'twisted',
+        'h2',
     ],
 )
