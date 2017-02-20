@@ -50,12 +50,12 @@ def collect_data(events, stream_id):
     while events and isinstance(events[0], h2.events.DataReceived):
         e = events.pop(0)
         data.append(e.data)
-    return ''.join(data), events
+    return b''.join(data), events
 
 
 @pytest.inlineCallbacks
 def test_rpc_success(transport, proto):
-    d = proto.call_rpc('foo', 'payload', 5)
+    d = proto.call_rpc('foo', b'payload', 5)
     conn = H2Connection(client_side=False)
     conn.initiate_connection()
     proto.dataReceived(conn.data_to_send())
@@ -76,10 +76,10 @@ def test_rpc_success(transport, proto):
     assert req.headers[6] == ('content-type', 'application/grpc+proto')
 
     # No compression
-    assert data[0] == b'\x00'
+    assert data[0:1] == b'\x00'
     # Length of 'payload' network byte order
     assert data[1:5] == b'\x00\x00\x00\x07'
-    assert data[5:] == 'payload'
+    assert data[5:] == b'payload'
 
     assert end.stream_id == req.stream_id
 
@@ -93,16 +93,16 @@ def test_rpc_success(transport, proto):
     conn.send_data(req.stream_id, b'\x00')
     # Length of 'result' network byte order
     conn.send_data(req.stream_id, b'\x00\x00\x00\x06')
-    conn.send_data(req.stream_id, 'result', end_stream=True)
+    conn.send_data(req.stream_id, b'result', end_stream=True)
 
     proto.dataReceived(conn.data_to_send())
 
-    assert 'result' == (yield d)
+    assert b'result' == (yield d)
 
 
 @pytest.inlineCallbacks
 def test_timeout(transport, proto, clock):
-    d = proto.call_rpc('foo', 'payload', 5)
+    d = proto.call_rpc('foo', b'payload', 5)
     conn = H2Connection(client_side=False)
     conn.initiate_connection()
     proto.dataReceived(conn.data_to_send())
@@ -115,7 +115,7 @@ def test_timeout(transport, proto, clock):
 
 @pytest.inlineCallbacks
 def test_compression(transport, proto, clock):
-    d = proto.call_rpc('foo', 'payload', 5)
+    d = proto.call_rpc('foo', b'payload', 5)
     conn = H2Connection(client_side=False)
     conn.initiate_connection()
     proto.dataReceived(conn.data_to_send())
@@ -131,7 +131,7 @@ def test_compression(transport, proto, clock):
     conn.send_data(req.stream_id, b'\x01')
     # Length of 'result' network byte order
     conn.send_data(req.stream_id, b'\x00\x00\x00\x06')
-    conn.send_data(req.stream_id, 'result')
+    conn.send_data(req.stream_id, b'result')
     conn.send_headers(
         req.stream_id,
         (
@@ -150,7 +150,7 @@ def test_compression(transport, proto, clock):
 
 @pytest.inlineCallbacks
 def test_size_too_small(transport, proto, clock):
-    d = proto.call_rpc('foo', 'payload', 5)
+    d = proto.call_rpc('foo', b'payload', 5)
     conn = H2Connection(client_side=False)
     conn.initiate_connection()
     proto.dataReceived(conn.data_to_send())
@@ -168,7 +168,7 @@ def test_size_too_small(transport, proto, clock):
     conn.send_data(req.stream_id, b'\x00')
     # Length of 'result' network byte order
     conn.send_data(req.stream_id, b'\x00\x00\x00\x04')
-    conn.send_data(req.stream_id, 'result', end_stream=True)
+    conn.send_data(req.stream_id, b'result', end_stream=True)
 
     proto.dataReceived(conn.data_to_send())
 
@@ -179,7 +179,7 @@ def test_size_too_small(transport, proto, clock):
 
 @pytest.inlineCallbacks
 def test_size_too_large(transport, proto, clock):
-    d = proto.call_rpc('foo', 'payload', 5)
+    d = proto.call_rpc('foo', b'payload', 5)
     conn = H2Connection(client_side=False)
     conn.initiate_connection()
     proto.dataReceived(conn.data_to_send())
@@ -197,7 +197,7 @@ def test_size_too_large(transport, proto, clock):
     conn.send_data(req.stream_id, b'\x00')
     # Length of 'result' network byte order
     conn.send_data(req.stream_id, b'\x00\x00\x00\x09')
-    conn.send_data(req.stream_id, 'result', end_stream=True)
+    conn.send_data(req.stream_id, b'result', end_stream=True)
 
     proto.dataReceived(conn.data_to_send())
 
@@ -208,7 +208,7 @@ def test_size_too_large(transport, proto, clock):
 
 @pytest.inlineCallbacks
 def test_http_error(transport, proto, clock):
-    d = proto.call_rpc('foo', 'payload', 5)
+    d = proto.call_rpc('foo', b'payload', 5)
     conn = H2Connection(client_side=False)
     conn.initiate_connection()
     proto.dataReceived(conn.data_to_send())
@@ -225,12 +225,13 @@ def test_http_error(transport, proto, clock):
 
     with pytest.raises(GRPCError) as excinfo:
         yield d
-    assert str(excinfo.value) == 'Non-200 status code. u\'500\''
+    value = str(excinfo.value).replace('u\'', '\'')
+    assert value == 'Non-200 status code. \'500\''
 
 
 @pytest.inlineCallbacks
 def test_http_reset(transport, proto, clock):
-    d = proto.call_rpc('foo', 'payload', 5)
+    d = proto.call_rpc('foo', b'payload', 5)
     conn = H2Connection(client_side=False)
     conn.initiate_connection()
     proto.dataReceived(conn.data_to_send())
@@ -250,7 +251,7 @@ def test_http_reset(transport, proto, clock):
 
 @pytest.inlineCallbacks
 def test_grpc_error(transport, proto, clock):
-    d = proto.call_rpc('foo', 'payload', 5)
+    d = proto.call_rpc('foo', b'payload', 5)
     conn = H2Connection(client_side=False)
     conn.initiate_connection()
     proto.dataReceived(conn.data_to_send())
@@ -275,4 +276,5 @@ def test_grpc_error(transport, proto, clock):
 
     with pytest.raises(GRPCError) as excinfo:
         yield d
-    assert str(excinfo.value) == 'Non-0 grpc-status code. u\'1\' u\'I am sad\''
+    value = str(excinfo.value).replace('u\'', '\'')
+    assert value == 'Non-0 grpc-status code. \'1\' \'I am sad\''

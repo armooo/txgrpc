@@ -50,7 +50,7 @@ class GRPCUnaryResult(object):
             self._stats.log_error(time.time() - self._start)
             self._defered.errback(error)
         else:
-            data = ''.join(self._data)
+            data = b''.join(self._data)
             msg_header = data[:MESSAGE_HEADER.size]
             compressed, msg_len = MESSAGE_HEADER.unpack(msg_header)
             # TODO support compressed messages
