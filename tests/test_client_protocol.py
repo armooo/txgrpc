@@ -145,7 +145,7 @@ def test_compression(transport, proto, clock):
 
     with pytest.raises(GRPCError) as excinfo:
         yield d
-    assert str(excinfo.value) == 'Compression not suported'
+    assert str(excinfo.value) == 'Compression not supported'
 
 
 @pytest.inlineCallbacks
@@ -174,7 +174,7 @@ def test_size_too_small(transport, proto, clock):
 
     with pytest.raises(GRPCError) as excinfo:
         yield d
-    assert str(excinfo.value) == 'Result the wrong size'
+    assert str(excinfo.value) == 'Extra data in stream'
 
 
 @pytest.inlineCallbacks
@@ -203,7 +203,7 @@ def test_size_too_large(transport, proto, clock):
 
     with pytest.raises(GRPCError) as excinfo:
         yield d
-    assert str(excinfo.value) == 'Result the wrong size'
+    assert str(excinfo.value) == 'Extra data in stream'
 
 
 @pytest.inlineCallbacks

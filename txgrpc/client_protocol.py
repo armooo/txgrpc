@@ -18,19 +18,68 @@ from txgrpc.errors import GRPCError
 MESSAGE_HEADER = struct.Struct('!?L')
 
 
-class GRPCUnaryResult(object):
-    def __init__(self, defered, stats):
+class UnaryResult(object):
+    def __init__(self, defered):
         self._defered = defered
+        self._done = False
+
+    def message_received(self, message):
+        self._message = message
+
+    def connection_lost(self, headers, reason):
+        if self._done:
+            return
+        self._done = True
+        if reason:
+            self._defered.errback(reason)
+        else:
+            self._defered.callback(self._message)
+
+
+class GRPCResult(object):
+    """
+    Accumulates results for a single gRPC call
+
+    Headers and data from a HTTP2 stream sent to the set_headers and add_data
+    methods of this class. When each a message is fully received
+    protocol.message_received is called with the bytes payload. When the stream
+    is closed protocol.connection_lost(headers, reason) is called. If there was
+    an error with the connection reason will be a subclass of GRPCError
+    otherwise reason will be None.
+
+    This works much like a LineReceiver.
+    """
+    def __init__(self, protocol, stats):
+        self._protocol = protocol
         self._stats = stats
         self._headers = {}
-        self._data = []
+        self._data = bytearray()
         self._start = time.time()
+        self._msg_size = None
 
     def set_headers(self, headers):
         self._headers.update(headers)
 
     def add_data(self, data):
-        self._data.append(data)
+        self._data.extend(data)
+
+        while len(self._data) >= MESSAGE_HEADER.size:
+            if self._msg_size is None:
+                msg_header = self._data[:MESSAGE_HEADER.size]
+                compressed, self._msg_size = MESSAGE_HEADER.unpack(msg_header)
+                del self._data[:MESSAGE_HEADER.size]
+                # TODO support compressed messages
+                if compressed:
+                    error = GRPCError('Compression not supported')
+                    self._protocol.connection_lost(self._headers, error)
+                    return
+
+            if len(self._data) < self._msg_size:
+                return
+
+            self._protocol.message_received(self._data[:self._msg_size])
+            del self._data[:self._msg_size]
+            self._msg_size = None
 
     def _check_errors(self):
         if self._headers[':status'] != '200':
@@ -48,29 +97,28 @@ class GRPCUnaryResult(object):
         error = self._check_errors()
         if error is not None:
             self._stats.log_error(time.time() - self._start)
-            self._defered.errback(error)
+            self._protocol.connection_lost(self._headers, error)
+        elif self._data:
+            error = GRPCError('Extra data in stream')
+            self._stats.log_error(time.time() - self._start)
+            self._protocol.connection_lost(self._headers, error)
         else:
-            data = b''.join(self._data)
-            msg_header = data[:MESSAGE_HEADER.size]
-            compressed, msg_len = MESSAGE_HEADER.unpack(msg_header)
-            # TODO support compressed messages
-            if compressed:
-                self._defered.errback(GRPCError('Compression not suported'))
-                return
-            if msg_len + MESSAGE_HEADER.size != len(data):
-                self._defered.errback(GRPCError('Result the wrong size'))
-                return
-            msg = data[MESSAGE_HEADER.size:]
             self._stats.log_success(time.time() - self._start)
-            self._defered.callback(msg)
+            self._protocol.connection_lost(self._headers, None)
 
     def reset(self):
         error = GRPCError('Stream reset')
         self._stats.log_error(time.time() - self._start)
-        self._defered.errback(error)
+        self._protocol.connection_lost(self._headers, error)
 
 
 class GRPCClientProtocol(protocol.Protocol):
+    """
+    Manages a HTTP2 connection to a gRPC server
+
+    Mutable requests can be in progress over a single connection. The protocol
+    keeps track of a HTTP2 stream_id to GRPCResult instances.
+    """
     def __init__(self, clock, authority, stats):
         self._clock = clock
         self._conn = H2Connection()
@@ -113,12 +161,12 @@ class GRPCClientProtocol(protocol.Protocol):
         self._pending_results[event.stream_id].set_headers(event.headers)
 
     def h2_stream_ended(self, event):
-        pending__result = self._pending_results.pop(event.stream_id)
-        pending__result.end()
+        pending_result = self._pending_results.pop(event.stream_id)
+        pending_result.end()
 
     def h2_stream_reset(self, event):
-        pending__result = self._pending_results.pop(event.stream_id)
-        pending__result.reset()
+        pending_result = self._pending_results.pop(event.stream_id)
+        pending_result.reset()
 
     def _convert_timeout(self, timeout):
         # TODO support more units
@@ -153,8 +201,9 @@ class GRPCClientProtocol(protocol.Protocol):
 
         defered = defer.Deferred(functools.partial(self._canceller, stream_id))
         defered.addTimeout(timeout, self._clock)
-        self._pending_results[stream_id] = GRPCUnaryResult(
-            defered,
+
+        self._pending_results[stream_id] = GRPCResult(
+            UnaryResult(defered),
             self._stats,
         )
         return defered
