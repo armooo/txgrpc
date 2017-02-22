@@ -21,15 +21,11 @@ MESSAGE_HEADER = struct.Struct('!?L')
 class UnaryResult(object):
     def __init__(self, defered):
         self._defered = defered
-        self._done = False
 
     def message_received(self, message):
         self._message = message
 
     def connection_lost(self, headers, reason):
-        if self._done:
-            return
-        self._done = True
         if reason:
             self._defered.errback(reason)
         else:
@@ -56,9 +52,15 @@ class GRPCResult(object):
         self._data = bytearray()
         self._start = time.time()
         self._msg_size = None
+        self._done = False
 
     def set_headers(self, headers):
         self._headers.update(headers)
+
+    def _error(self, error):
+        self._stats.log_error(time.time() - self._start)
+        self._protocol.connection_lost(self._headers, error)
+        self._done = True
 
     def add_data(self, data):
         self._data.extend(data)
@@ -70,8 +72,7 @@ class GRPCResult(object):
                 del self._data[:MESSAGE_HEADER.size]
                 # TODO support compressed messages
                 if compressed:
-                    error = GRPCError('Compression not supported')
-                    self._protocol.connection_lost(self._headers, error)
+                    self._error(GRPCError('Compression not supported'))
                     return
 
             if len(self._data) < self._msg_size:
@@ -94,14 +95,13 @@ class GRPCResult(object):
             ))
 
     def end(self):
+        if self._done:
+            return
         error = self._check_errors()
         if error is not None:
-            self._stats.log_error(time.time() - self._start)
-            self._protocol.connection_lost(self._headers, error)
+            self._error(error)
         elif self._data:
-            error = GRPCError('Extra data in stream')
-            self._stats.log_error(time.time() - self._start)
-            self._protocol.connection_lost(self._headers, error)
+            self._error(GRPCError('Extra data in stream'))
         else:
             self._stats.log_success(time.time() - self._start)
             self._protocol.connection_lost(self._headers, None)
