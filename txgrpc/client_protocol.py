@@ -32,6 +32,59 @@ class UnaryResult(object):
             self._defered.callback(self._message)
 
 
+class StreamingResult(object):
+    def __init__(self):
+        self._messages = []
+        self._defered = None
+        self._error = None
+        self._finished = False
+        self._defered = None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._messages:
+            return defer.succeed(self._messages.pop(0))
+        elif self._error:
+            error = self._error
+            self._error = None
+            return defer.fail(error)
+        elif self._finished:
+            # Should we make sure to always have a Deferred with a None before
+            # the StopIteration? Currently it depends if you call next before
+            # or after connection_lost is called.
+            raise StopIteration
+        elif not self._defered:
+            self._defered = defer.Deferred()
+            self._defered.addBoth(self._clear_defered)
+            return self._defered
+        else:
+            raise GRPCError('You can not see the future')
+
+    next = __next__
+
+    def _clear_defered(self, result):
+        self._defered = None
+        return result
+
+    def message_received(self, message):
+        if self._defered:
+            self._defered.callback(message)
+        else:
+            self._messages.append(message)
+
+    def connection_lost(self, headers, reason):
+        self._finished = True
+        if self._defered:
+            if reason:
+                self._defered.errback(reason)
+            else:
+                self._defered.callback(None)
+        elif reason:
+            self._error = reason
+
+
 class GRPCResult(object):
     """
     Accumulates results for a single gRPC call
@@ -176,15 +229,7 @@ class GRPCClientProtocol(protocol.Protocol):
         self._conn.reset_stream(stream_id, ErrorCodes.CANCEL)
         del self._pending_results[stream_id]
 
-    def call_rpc(self, method, data, timeout):
-        # Push the timeout by 50ms to allow the server to send a reset first
-        # and allow for a bit of latency.
-        # TODO: tune this with pings
-        timeout = timeout + .05
-
-        # TODO: fail on max id
-        stream_id = self._conn.get_next_available_stream_id()
-
+    def _call_unary_rpc(self, stream_id, method, data, timeout, result):
         headers = (
             (':method', 'POST'),
             (':scheme', 'http'),
@@ -198,12 +243,37 @@ class GRPCClientProtocol(protocol.Protocol):
         self._conn.send_data(stream_id, MESSAGE_HEADER.pack(False, len(data)))
         self._conn.send_data(stream_id, data, end_stream=True)
         self.transport.write(self._conn.data_to_send())
+        self._pending_results[stream_id] = GRPCResult(
+            result,
+            self._stats,
+        )
+
+    def call_rpc(self, method, data, timeout):
+        # TODO: fail on max id
+        stream_id = self._conn.get_next_available_stream_id()
+
+        # Push the timeout by 50ms to allow the server to send a reset first
+        # and allow for a bit of latency.
+        # TODO: tune this with pings
+        timeout = timeout + .05
 
         defered = defer.Deferred(functools.partial(self._canceller, stream_id))
         defered.addTimeout(timeout, self._clock)
+        result = UnaryResult(defered)
 
-        self._pending_results[stream_id] = GRPCResult(
-            UnaryResult(defered),
-            self._stats,
-        )
+        self._call_unary_rpc(stream_id, method, data, timeout, result)
+
         return defered
+
+    def call_unary_streaming_rpc(self, method, data, timeout):
+        # TODO: fail on max id
+        stream_id = self._conn.get_next_available_stream_id()
+
+        # Push the timeout by 50ms to allow the server to send a reset first
+        # and allow for a bit of latency.
+        # TODO: tune this with pings
+        timeout = timeout + .05
+
+        result = StreamingResult()
+        self._call_unary_rpc(stream_id, method, data, timeout, result)
+        return result

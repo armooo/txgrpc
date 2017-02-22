@@ -278,3 +278,201 @@ def test_grpc_error(transport, proto, clock):
         yield d
     value = str(excinfo.value).replace('u\'', '\'')
     assert value == 'Non-0 grpc-status code. \'1\' \'I am sad\''
+
+
+@pytest.inlineCallbacks
+def test_unary_streaming_rpc_success(transport, proto):
+    result = proto.call_unary_streaming_rpc('foo', b'payload', 5)
+    conn = H2Connection(client_side=False)
+    conn.initiate_connection()
+    proto.dataReceived(conn.data_to_send())
+
+    events = conn.receive_data(transport.value())
+    transport.clear()
+
+    req, events = next_event(events, h2.events.RequestReceived)
+    data, events = collect_data(events, req.stream_id)
+    end, events = next_event(events, h2.events.StreamEnded)
+
+    assert req.headers[0] == (':method', 'POST')
+    assert req.headers[1] == (':scheme', 'http')
+    assert req.headers[2] == (':path', 'foo')
+    assert req.headers[3] == (':authority', 'localhost:8080')
+    assert req.headers[4] == ('grpc-timeout', '5050m')
+    assert req.headers[5] == ('te', 'trailers')
+    assert req.headers[6] == ('content-type', 'application/grpc+proto')
+
+    # No compression
+    assert data[0:1] == b'\x00'
+    # Length of 'payload' network byte order
+    assert data[1:5] == b'\x00\x00\x00\x07'
+    assert data[5:] == b'payload'
+
+    assert end.stream_id == req.stream_id
+
+    conn.send_headers(req.stream_id, (
+        (':status', '200'),
+        ('grpc-status', '0'),
+        ('grpc-message', 'OK'),
+    ))
+
+    # No compression
+    conn.send_data(req.stream_id, b'\x00')
+    # Length of 'result1' network byte order
+    conn.send_data(req.stream_id, b'\x00\x00\x00\x07')
+    conn.send_data(req.stream_id, b'result1')
+
+    # No compression
+    conn.send_data(req.stream_id, b'\x00')
+    # Length of 'result2' network byte order
+    conn.send_data(req.stream_id, b'\x00\x00\x00\x07')
+    conn.send_data(req.stream_id, b'result2', end_stream=True)
+
+    proto.dataReceived(conn.data_to_send())
+
+    for i, d in enumerate(result, 1):
+        if d is None:
+            break
+        assert ('result%s' % i).encode('ascii') == (yield d)
+
+
+@pytest.inlineCallbacks
+def test_unary_streaming_rpc_success_defered(transport, proto):
+    result = proto.call_unary_streaming_rpc('foo', b'payload', 5)
+    conn = H2Connection(client_side=False)
+    conn.initiate_connection()
+    proto.dataReceived(conn.data_to_send())
+
+    events = conn.receive_data(transport.value())
+    transport.clear()
+
+    d = result.next()
+
+    req, events = next_event(events, h2.events.RequestReceived)
+    data, events = collect_data(events, req.stream_id)
+    end, events = next_event(events, h2.events.StreamEnded)
+
+    assert req.headers[0] == (':method', 'POST')
+    assert req.headers[1] == (':scheme', 'http')
+    assert req.headers[2] == (':path', 'foo')
+    assert req.headers[3] == (':authority', 'localhost:8080')
+    assert req.headers[4] == ('grpc-timeout', '5050m')
+    assert req.headers[5] == ('te', 'trailers')
+    assert req.headers[6] == ('content-type', 'application/grpc+proto')
+
+    # No compression
+    assert data[0:1] == b'\x00'
+    # Length of 'payload' network byte order
+    assert data[1:5] == b'\x00\x00\x00\x07'
+    assert data[5:] == b'payload'
+
+    assert end.stream_id == req.stream_id
+
+    conn.send_headers(req.stream_id, (
+        (':status', '200'),
+        ('grpc-status', '0'),
+        ('grpc-message', 'OK'),
+    ))
+
+    # No compression
+    conn.send_data(req.stream_id, b'\x00')
+    # Length of 'result1' network byte order
+    conn.send_data(req.stream_id, b'\x00\x00\x00\x07')
+    conn.send_data(req.stream_id, b'result1')
+    proto.dataReceived(conn.data_to_send())
+
+    assert b'result1' == (yield d)
+
+    d = result.next()
+
+    # No compression
+    conn.send_data(req.stream_id, b'\x00')
+    # Length of 'result2' network byte order
+    conn.send_data(req.stream_id, b'\x00\x00\x00\x07')
+    conn.send_data(req.stream_id, b'result2')
+    proto.dataReceived(conn.data_to_send())
+
+    assert b'result2' == (yield d)
+
+    d = result.next()
+
+    conn.end_stream(req.stream_id)
+    proto.dataReceived(conn.data_to_send())
+
+    assert None is (yield d)
+
+
+@pytest.inlineCallbacks
+def test_unary_streaming_rpc_error(transport, proto, clock):
+    results = proto.call_unary_streaming_rpc('foo', b'payload', 5)
+    conn = H2Connection(client_side=False)
+    conn.initiate_connection()
+    proto.dataReceived(conn.data_to_send())
+
+    events = conn.receive_data(transport.value())
+    transport.clear()
+    req, events = next_event(events, h2.events.RequestReceived)
+
+    conn.send_headers(req.stream_id, (
+        (':status', '200'),
+    ))
+    conn.send_headers(
+        req.stream_id,
+        (
+            ('grpc-status', '1'),
+            ('grpc-message', 'I am sad'),
+        ),
+        end_stream=True
+    )
+
+    proto.dataReceived(conn.data_to_send())
+
+    for d in results:
+        if d is None:
+            break
+        with pytest.raises(GRPCError) as excinfo:
+            yield d
+
+    value = str(excinfo.value).replace('u\'', '\'')
+    assert value == 'Non-0 grpc-status code. \'1\' \'I am sad\''
+
+
+@pytest.inlineCallbacks
+def test_unary_streaming_rpc_error_defered(transport, proto, clock):
+    results = proto.call_unary_streaming_rpc('foo', b'payload', 5)
+    conn = H2Connection(client_side=False)
+    conn.initiate_connection()
+    proto.dataReceived(conn.data_to_send())
+
+    d = results.next()
+
+    events = conn.receive_data(transport.value())
+    transport.clear()
+    req, events = next_event(events, h2.events.RequestReceived)
+
+    conn.send_headers(req.stream_id, (
+        (':status', '200'),
+    ))
+    conn.send_headers(
+        req.stream_id,
+        (
+            ('grpc-status', '1'),
+            ('grpc-message', 'I am sad'),
+        ),
+        end_stream=True
+    )
+
+    proto.dataReceived(conn.data_to_send())
+
+    with pytest.raises(GRPCError) as excinfo:
+        yield d
+
+    value = str(excinfo.value).replace('u\'', '\'')
+    assert value == 'Non-0 grpc-status code. \'1\' \'I am sad\''
+
+
+def test_unary_streaming_rpc_peak(transport, proto, clock):
+    results = proto.call_unary_streaming_rpc('foo', b'payload', 5)
+    with pytest.raises(GRPCError) as excinfo:
+        list(results)
+    assert str(excinfo.value) == 'You can not see the future'
